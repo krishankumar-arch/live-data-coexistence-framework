@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  LDCF POC Stack 5/5 - AWS DMS
+  Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
+  DMS Replication Instance, Source/Target Endpoints, Two Tasks
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ldcf-poc
+  MySQLEndpoint:
+    Type: String
+    Description: RDS MySQL endpoint (from stack 2)
+  AuroraEndpoint:
+    Type: String
+    Description: Aurora PostgreSQL endpoint (from stack 2)
+  MySQLPassword:
+    Type: String
+    NoEcho: true
+  AuroraPassword:
+    Type: String
+    NoEcho: true
+  DBUsername:
+    Type: String
+    Default: ldcfadmin
+  LandingBucketName:
+    Type: String
+    Description: S3 landing bucket name (from stack 3)
+
+Resources:
+  # ── IAM Role for DMS S3 access ────────────────────────────────
+  DMSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-dms-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: dms.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DMSS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject,
+                         s3:PutObjectTagging, s3:ListBucket]
+                Resource:
+                  - !Sub "arn:aws:s3:::${LandingBucketName}"
+                  - !Sub "arn:aws:s3:::${LandingBucketName}/*"
+
+  # ── DMS Replication Instance ──────────────────────────────────
+  # dms.t3.micro — lowest cost option
+  DMSReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      ReplicationInstanceIdentifier: !Sub "${EnvironmentName}-rep-instance"
+      ReplicationInstanceClass: dms.t3.micro
+      AllocatedStorage: 20
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationSubnetGroupIdentifier: !Ref DMSSubnetGroup
+      VpcSecurityGroupIds:
+        - !ImportValue {Fn::Sub: "${EnvironmentName}-db-sg"}
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-dms"}
+
+  DMSSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: LDCF POC DMS subnet group
+      SubnetIds:
+        - !ImportValue {Fn::Sub: "${EnvironmentName}-subnet-a"}
+        - !ImportValue {Fn::Sub: "${EnvironmentName}-subnet-b"}
+
+  # ── Source Endpoint: MySQL ────────────────────────────────────
+  MySQLSourceEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Sub "${EnvironmentName}-mysql-source"
+      EndpointType: source
+      EngineName: mysql
+      ServerName: !Ref MySQLEndpoint
+      Port: 3306
+      DatabaseName: insurance
+      Username: !Ref DBUsername
+      Password: !Ref MySQLPassword
+      ExtraConnectionAttributes: "eventsPollInterval=5;parallelLoadThreads=1"
+
+  # ── Target Endpoint: S3 (CSV output) ─────────────────────────
+  # DMS writes pipe-separated CSV to S3
+  # Lambda 1 (Claim Check) is triggered on each file
+  S3TargetEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Sub "${EnvironmentName}-s3-target"
+      EndpointType: target
+      EngineName: s3
+      S3Settings:
+        BucketName: !Ref LandingBucketName
+        BucketFolder: dms/sync
+        ServiceAccessRoleArn: !GetAtt DMSRole.Arn
+        # Pipe-separated CSV — no header row
+        CsvDelimiter: "|"
+        CsvRowDelimiter: "\n"
+        # Include operation type column (COLUMN1 = I/U/D)
+        IncludeOpForFullLoad: true
+        CdcInsertsAndUpdates: true
+        CdcPath: dms/sync
+
+  # ── DMS Task 1: Full Load ─────────────────────────────────────
+  # Runs ONCE — copies all existing claim and policy rows
+  # Start manually from console after Task is created
+  # Stop after completion before running keyring load script
+  FullLoadTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      ReplicationTaskIdentifier: !Sub "${EnvironmentName}-fullload"
+      ReplicationInstanceArn: !Ref DMSReplicationInstance
+      SourceEndpointArn: !Ref MySQLSourceEndpoint
+      TargetEndpointArn: !Ref S3TargetEndpoint
+      MigrationType: full-load
+      TableMappings: |
+        {
+          "rules": [
+            {
+              "rule-type": "selection",
+              "rule-id": "1",
+              "rule-name": "include-insurance-tables",
+              "object-locator": {
+                "schema-name": "insurance",
+                "table-name": "%"
+              },
+              "rule-action": "include"
+            }
+          ]
+        }
+      ReplicationTaskSettings: |
+        {
+          "TargetMetadata": {
+            "TargetSchema": "",
+            "SupportLobs": true,
+            "FullLobMode": false,
+            "LobChunkSize": 64
+          },
+          "FullLoadSettings": {
+            "TargetTablePrepMode": "DO_NOTHING",
+            "CreatePkAfterFullLoad": false,
+            "StopTaskCachedChangesApplied": false,
+            "StopTaskCachedChangesNotApplied": false,
+            "MaxFullLoadSubTasks": 2,
+            "TransactionConsistencyTimeout": 600,
+            "CommitRate": 10000
+          }
+        }
+
+  # ── DMS Task 2: CDC Ongoing ───────────────────────────────────
+  # Starts AFTER full load completes AND keyring script runs
+  # Runs continuously — feeds the LDCF upstream pipeline
+  CDCTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      ReplicationTaskIdentifier: !Sub "${EnvironmentName}-cdc"
+      ReplicationInstanceArn: !Ref DMSReplicationInstance
+      SourceEndpointArn: !Ref MySQLSourceEndpoint
+      TargetEndpointArn: !Ref S3TargetEndpoint
+      MigrationType: cdc
+      TableMappings: |
+        {
+          "rules": [
+            {
+              "rule-type": "selection",
+              "rule-id": "1",
+              "rule-name": "cdc-insurance-tables",
+              "object-locator": {
+                "schema-name": "insurance",
+                "table-name": "%"
+              },
+              "rule-action": "include"
+            }
+          ]
+        }
+      ReplicationTaskSettings: |
+        {
+          "TargetMetadata": {
+            "SupportLobs": true,
+            "FullLobMode": false,
+            "LobChunkSize": 64
+          },
+          "ChangeProcessingTuning": {
+            "BatchApplyPreserveTransaction": true,
+            "BatchApplyTimeoutMin": 1,
+            "BatchApplyTimeoutMax": 30,
+            "BatchApplyMemoryLimit": 500,
+            "BatchSplitSize": 0
+          },
+          "ChangeProcessingDdlHandlingPolicy": {
+            "EnableDdlReplication": true
+          },
+          "Logging": {
+            "EnableLogging": true
+          }
+        }
+
+Outputs:
+  DMSReplicationInstanceArn:
+    Value: !Ref DMSReplicationInstance
+  FullLoadTaskArn:
+    Value: !Ref FullLoadTask
+    Export: {Name: !Sub "${EnvironmentName}-fullload-task-arn"}
+  CDCTaskArn:
+    Value: !Ref CDCTask
+    Export: {Name: !Sub "${EnvironmentName}-cdc-task-arn"}

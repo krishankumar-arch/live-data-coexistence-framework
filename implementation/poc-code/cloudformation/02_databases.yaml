@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  LDCF POC Stack 2/5 - Databases
+  Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
+  RDS MySQL (legacy source) + Aurora PostgreSQL Serverless v2 (cloud target)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ldcf-poc
+  DBUsername:
+    Type: String
+    Default: ldcfadmin
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Password for both databases (min 8 chars)
+
+Resources:
+  # ── Secrets Manager ──────────────────────────────────────────
+  MySQLSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}-mysql-secret"
+      Description: RDS MySQL credentials for LDCF POC
+      SecretString: !Sub |
+        {"username":"${DBUsername}","password":"${DBPassword}"}
+
+  AuroraSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}-aurora-secret"
+      Description: Aurora PostgreSQL credentials for LDCF POC
+      SecretString: !Sub |
+        {"username":"${DBUsername}","password":"${DBPassword}"}
+
+  # ── RDS MySQL — Legacy Source ─────────────────────────────────
+  # Free tier: db.t3.micro, 20GB storage
+  # Parameter group enables binary logging for DMS CDC
+  MySQLParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: LDCF POC MySQL params — enables CDC for DMS
+      Family: mysql8.0
+      Parameters:
+        binlog_format:    ROW
+        binlog_row_image: FULL
+        binlog_checksum:  NONE
+
+  MySQLInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-mysql-legacy"
+      DBInstanceClass: db.t3.micro        # free tier eligible
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: insurance
+      AllocatedStorage: "20"
+      StorageType: gp2
+      PubliclyAccessible: false
+      MultiAZ: false
+      DBSubnetGroupName: !ImportValue
+        Fn::Sub: "${EnvironmentName}-db-subnet-group"
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: "${EnvironmentName}-db-sg"
+      DBParameterGroupName: !Ref MySQLParamGroup
+      BackupRetentionPeriod: 1
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-mysql-legacy"}
+        - {Key: Pattern, Value: "LDCF-Pattern-1-even-sequences"}
+
+  # ── Aurora PostgreSQL Serverless v2 — Cloud Target ───────────
+  # Scales to 0.5 ACU minimum (near-zero cost when idle)
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Sub "${EnvironmentName}-aurora-target"
+      Engine: aurora-postgresql
+      EngineVersion: "15.4"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DatabaseName: ldcfdb
+      DBSubnetGroupName: !ImportValue
+        Fn::Sub: "${EnvironmentName}-db-subnet-group"
+      VpcSecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: "${EnvironmentName}-db-sg"
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5   # minimum ACU — near-zero cost when idle
+        MaxCapacity: 4     # sufficient for POC load
+      BackupRetentionPeriod: 1
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-aurora-target"}
+        - {Key: Pattern, Value: "LDCF-Pattern-1-odd-sequences"}
+
+  AuroraInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-aurora-instance"
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+
+Outputs:
+  MySQLEndpoint:
+    Value: !GetAtt MySQLInstance.Endpoint.Address
+    Export: {Name: !Sub "${EnvironmentName}-mysql-endpoint"}
+
+  AuroraEndpoint:
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export: {Name: !Sub "${EnvironmentName}-aurora-endpoint"}
+
+  MySQLSecretArn:
+    Value: !Ref MySQLSecret
+    Export: {Name: !Sub "${EnvironmentName}-mysql-secret-arn"}
+
+  AuroraSecretArn:
+    Value: !Ref AuroraSecret
+    Export: {Name: !Sub "${EnvironmentName}-aurora-secret-arn"}

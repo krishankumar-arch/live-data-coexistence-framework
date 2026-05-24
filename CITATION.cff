@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this framework, please cite it as below."
+type: software
+title: "Live Data Coexistence Framework (LDCF)"
+abstract: >
+  A validated five-layer architecture and reference implementation for
+  zero-downtime enterprise legacy system modernization. Enables bidirectional
+  live data synchronization between legacy and cloud systems throughout a
+  multi-year migration program. Includes eight original integrity patterns
+  and a deployable AWS proof-of-concept.
+authors:
+  - family-names: Kumar
+    given-names: Krishan
+    orcid: https://orcid.org/0009-0009-7302-7566
+version: "1.0.0"
+date-released: "2026-06-17"
+license: Apache-2.0
+repository-code: "https://github.com/krishankumar-arch/live-data-coexistence-framework"
+keywords:
+  - legacy modernization
+  - data replication
+  - CDC
+  - change data capture
+  - AWS DMS
+  - Aurora PostgreSQL
+  - zero downtime migration
+  - enterprise architecture
+  - coexistence pattern
+  - bidirectional sync
+preferred-citation:
+  type: article
+  title: >
+    Live Data Coexistence Framework: A Validated Bidirectional Architecture
+    for Zero-Downtime Enterprise MIS Modernization
+  authors:
+    - family-names: Kumar
+      given-names: Krishan
+      orcid: https://orcid.org/0009-0009-7302-7566
+  year: 2026
+  journal: "arXiv preprint cs.DC"
+  url: "https://arxiv.org/abs/TBD"

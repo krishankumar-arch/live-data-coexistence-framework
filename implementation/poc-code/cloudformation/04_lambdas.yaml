@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  LDCF POC Stack 4/5 - Lambda Functions
+  Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
+  All 4 Lambda functions, IAM roles, S3 trigger, SQS trigger
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ldcf-poc
+  LambdaDeployBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  DBHost:
+    Type: String
+    Description: Aurora PostgreSQL endpoint (from stack 2 outputs)
+  DBName:
+    Type: String
+    Default: ldcfdb
+  AuroraSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for Aurora credentials
+
+Resources:
+  # ── Shared IAM Role for all Lambdas ──────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: LDCFLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub
+                  - "${BucketArn}/*"
+                  - BucketArn: !ImportValue
+                      Fn::Sub: "${EnvironmentName}-landing-bucket-arn"
+              - Effect: Allow
+                Action: [sqs:SendMessage, sqs:ReceiveMessage,
+                         sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource:
+                  - !ImportValue {Fn::Sub: "${EnvironmentName}-queue-arn"}
+                  - !ImportValue {Fn::Sub: "${EnvironmentName}-dlq-arn"}
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem,
+                         dynamodb:UpdateItem, dynamodb:Query, dynamodb:Scan]
+                Resource: !Sub
+                  "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${EnvironmentName}-replication-audit*"
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Ref AuroraSecretArn
+              - Effect: Allow
+                Action: [lambda:InvokeFunction]
+                Resource: !Sub
+                  "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${EnvironmentName}-*"
+
+  # ── Lambda 1: Claim Check Handler ────────────────────────────
+  ClaimCheckLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-claim-check"
+      Description: "LDCF Claim Check Pattern — S3 trigger to SQS pointer"
+      Runtime: python3.11
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaDeployBucket
+        S3Key: lambda/01_claim_check.zip
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !ImportValue {Fn::Sub: "${EnvironmentName}-queue-url"}
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-claim-check"}
+        - {Key: Pattern, Value: "LDCF-Claim-Check-Pattern"}
+
+  ClaimCheckLambdaS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ClaimCheckLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !ImportValue {Fn::Sub: "${EnvironmentName}-landing-bucket-arn"}
+
+  # ── Lambda 2: Upstream Loader ─────────────────────────────────
+  UpstreamLoaderLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-upstream-loader"
+      Description: "LDCF Upstream Loader — all 8 integrity patterns"
+      Runtime: python3.11
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300           # 5 minutes for large CSV files
+      MemorySize: 512        # metadata cache + CSV parsing
+      Code:
+        S3Bucket: !Ref LambdaDeployBucket
+        S3Key: lambda/02_upstream_loader.zip
+      Environment:
+        Variables:
+          METADATA_SERVICE_LAMBDA: !Sub "${EnvironmentName}-metadata-service"
+          DYNAMODB_AUDIT_TABLE:    !Sub "${EnvironmentName}-replication-audit"
+          DB_SECRET_ARN:           !Ref AuroraSecretArn
+          DB_HOST:                 !Ref DBHost
+          DB_PORT:                 "5432"
+          DB_NAME:                 !Ref DBName
+          SQS_DLQ_URL:             !ImportValue {Fn::Sub: "${EnvironmentName}-dlq-url"}
+          MAX_RETRIES:             "3"
+          TTL_SUCCESS_DAYS:        "90"
+          TTL_FAILED_DAYS:         "180"
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-upstream-loader"}
+
+  # SQS trigger for Lambda 2 (batch size 1 for clean retry)
+  UpstreamLoaderSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue {Fn::Sub: "${EnvironmentName}-queue-arn"}
+      FunctionName: !GetAtt UpstreamLoaderLambda.Arn
+      BatchSize: 1
+      Enabled: true
+
+  # ── Lambda 3: Metadata Service ────────────────────────────────
+  MetadataServiceLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-metadata-service"
+      Description: "LDCF Metadata Service — mapping resolver"
+      Runtime: python3.11
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaDeployBucket
+        S3Key: lambda/03_metadata_service.zip
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !Ref AuroraSecretArn
+          DB_HOST:       !Ref DBHost
+          DB_PORT:       "5432"
+          DB_NAME:       !Ref DBName
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-metadata-service"}
+
+  # ── Lambda 4: DLQ Requeue Handler ────────────────────────────
+  DLQRequeueLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-dlq-requeue"
+      Description: "LDCF DLQ Requeue — retry orchestration"
+      Runtime: python3.11
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaDeployBucket
+        S3Key: lambda/04_dlq_requeue.zip
+      Environment:
+        Variables:
+          SQS_MAIN_QUEUE_URL: !ImportValue {Fn::Sub: "${EnvironmentName}-queue-url"}
+          MAX_RETRIES:        "3"
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-dlq-requeue"}
+        - {Key: Pattern, Value: "LDCF-Pattern-5-three-tier-DLQ"}
+
+  # SQS trigger for Lambda 4 from DLQ
+  DLQRequeueTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue {Fn::Sub: "${EnvironmentName}-dlq-arn"}
+      FunctionName: !GetAtt DLQRequeueLambda.Arn
+      BatchSize: 10
+      Enabled: true
+
+Outputs:
+  ClaimCheckLambdaArn:
+    Value: !GetAtt ClaimCheckLambda.Arn
+    Export: {Name: !Sub "${EnvironmentName}-claim-check-arn"}
+  UpstreamLoaderArn:
+    Value: !GetAtt UpstreamLoaderLambda.Arn
+  MetadataServiceArn:
+    Value: !GetAtt MetadataServiceLambda.Arn
+  DLQRequeueArn:
+    Value: !GetAtt DLQRequeueLambda.Arn

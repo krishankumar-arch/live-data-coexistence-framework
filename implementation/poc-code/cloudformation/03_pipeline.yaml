@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  LDCF POC Stack 3/5 - Event Pipeline
+  Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
+  S3 landing, SQS queues, DynamoDB audit table, SNS alerts
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ldcf-poc
+  AlertEmail:
+    Type: String
+    Description: Email for reconciliation alerts
+    Default: ops@example.com
+
+Resources:
+  # ── S3 Landing Bucket ─────────────────────────────────────────
+  LandingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-cdc-landing-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldCDCFiles
+            Status: Enabled
+            ExpirationInDays: 7
+      Tags:
+        - {Key: Name,  Value: !Sub "${EnvironmentName}-landing"}
+        - {Key: Layer, Value: "1-Ingestion"}
+
+  # ── SQS Dead Letter Queue ─────────────────────────────────────
+  ReplicationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${EnvironmentName}-replication-dlq"
+      MessageRetentionPeriod: 1209600   # 14 days
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-dlq"}
+        - {Key: Pattern, Value: "LDCF-Pattern-5-three-tier-DLQ"}
+
+  # ── SQS Main Queue ────────────────────────────────────────────
+  ReplicationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${EnvironmentName}-replication-queue"
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReplicationDLQ.Arn
+        maxReceiveCount: 1             # Lambda 2 manages retry logic itself
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-queue"}
+        - {Key: Pattern, Value: "LDCF-Claim-Check-Pattern"}
+
+  # ── DynamoDB Audit Table ──────────────────────────────────────
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-replication-audit"
+      BillingMode: PAY_PER_REQUEST    # free tier: 25GB
+      KeySchema:
+        - {AttributeName: event_id,   KeyType: HASH}
+        - {AttributeName: table_name, KeyType: RANGE}
+      AttributeDefinitions:
+        - {AttributeName: event_id,   AttributeType: S}
+        - {AttributeName: table_name, AttributeType: S}
+        - {AttributeName: status,     AttributeType: S}
+        - {AttributeName: created_at, AttributeType: S}
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - {AttributeName: status,     KeyType: HASH}
+            - {AttributeName: created_at, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+      TimeToLiveSpecification:
+        AttributeName: ttl_epoch
+        Enabled: true
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-audit"}
+        - {Key: Pattern, Value: "LDCF-Pattern-5-tiered-TTL"}
+
+  # ── SNS Alert Topic ───────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${EnvironmentName}-alerts"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+Outputs:
+  LandingBucketName:
+    Value: !Ref LandingBucket
+    Export: {Name: !Sub "${EnvironmentName}-landing-bucket"}
+
+  LandingBucketArn:
+    Value: !GetAtt LandingBucket.Arn
+    Export: {Name: !Sub "${EnvironmentName}-landing-bucket-arn"}
+
+  ReplicationQueueUrl:
+    Value: !Ref ReplicationQueue
+    Export: {Name: !Sub "${EnvironmentName}-queue-url"}
+
+  ReplicationQueueArn:
+    Value: !GetAtt ReplicationQueue.Arn
+    Export: {Name: !Sub "${EnvironmentName}-queue-arn"}
+
+  DLQUrl:
+    Value: !Ref ReplicationDLQ
+    Export: {Name: !Sub "${EnvironmentName}-dlq-url"}
+
+  DLQArn:
+    Value: !GetAtt ReplicationDLQ.Arn
+    Export: {Name: !Sub "${EnvironmentName}-dlq-arn"}
+
+  AuditTableName:
+    Value: !Ref AuditTable
+    Export: {Name: !Sub "${EnvironmentName}-audit-table"}
+
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export: {Name: !Sub "${EnvironmentName}-alert-topic"}
