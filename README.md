@@ -177,7 +177,7 @@ for the complete step-by-step deployment guide.
 
 ## White Paper
 
-> Kumar, K. (2026). *Live Data Coexistence Framework: A Validated Bidirectional
+> Kumar, Krishan (2026). *Live Data Coexistence Framework: A Validated Bidirectional
 > Architecture for Zero-Downtime Enterprise MIS Modernization.*
 > arXiv preprint cs.DC. https://arxiv.org/abs/TBD
 
