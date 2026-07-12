@@ -179,7 +179,7 @@ for the complete step-by-step deployment guide.
 
 > Kumar, Krishan (2026). *Live Data Coexistence Framework: A Validated Bidirectional
 > Architecture for Zero-Downtime Enterprise MIS Modernization.*
-> arXiv preprint cs.DC. https://arxiv.org/abs/TBD
+> Zenodo | https://doi.org/10.5281/zenodo.21313169
 
 Read the full paper: [whitepaper/LDCF_WhitePaper_v1.md](whitepaper/LDCF_WhitePaper_v1.md)
 
@@ -188,14 +188,16 @@ Read the full paper: [whitepaper/LDCF_WhitePaper_v1.md](whitepaper/LDCF_WhitePap
 ## Citation
 
 ```bibtex
-@article{kumar2026ldcf,
-  title   = {Live Data Coexistence Framework: A Validated Bidirectional
-             Architecture for Zero-Downtime Enterprise MIS Modernization},
-  author  = {Kumar, Krishan},
-  year    = {2026},
-  journal = {arXiv preprint cs.DC},
-  url     = {https://arxiv.org/abs/TBD},
-  note    = {ORCID: 0009-0009-7302-7566}
+@misc{kumar2026ldcf,
+  title     = {Live Data Coexistence Framework: A Validated Bidirectional
+               Architecture for Zero-Downtime Enterprise MIS Modernization},
+  author    = {Kumar, Krishan},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.21313169},
+  url       = {https://doi.org/10.5281/zenodo.21313169},
+  note      = {ORCID: 0009-0009-7302-7566.
+             GitHub: github.com/krishankumar-arch/live-data-coexistence-framework}
 }
 ```
 
