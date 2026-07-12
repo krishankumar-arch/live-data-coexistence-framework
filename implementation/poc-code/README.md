@@ -1,9 +1,14 @@
 # Live Data Coexistence Framework (LDCF) — POC
 
-> **Active-Active Data Replication for Zero-Downtime Enterprise Modernization**
+[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.21313169.svg)](https://doi.org/10.5281/zenodo.21313169)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![ORCID](https://img.shields.io/badge/ORCID-0009--0009--7302--7566-brightgreen.svg)](https://orcid.org/0009-0009-7302-7566)
+[![Version](https://img.shields.io/badge/Version-1.0-orange.svg)](https://doi.org/10.5281/zenodo.21313169)
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![ORCID](https://img.shields.io/badge/ORCID-0009--0009--7302--7566-green)](https://orcid.org/0009-0009-7302-7566)
+**A Validated Five-Layer Bidirectional Architecture for Zero-Downtime Enterprise MIS Modernization**
+
+*Krishan Kumar — Enterprise Architect | Distributed Systems Specialist*
+*ORCID: [0009-0009-7302-7566](https://orcid.org/0009-0009-7302-7566)*
 
 ---
 
@@ -226,13 +231,15 @@ poc-code/
 ## Citation
 
 ```bibtex
-@article{kumar2026ldcf,
-  title  = {Live Data Coexistence Framework: A Validated Bidirectional
-            Architecture for Zero-Downtime Enterprise MIS Modernization},
-  author = {Kumar, Krishan},
-  year   = {2026},
-  journal= {arXiv preprint cs.DC},
-  note   = {ORCID: 0009-0009-7302-7566}
+@misc{kumar2026ldcf,
+  title     = {Live Data Coexistence Framework: A Validated Bidirectional
+               Architecture for Zero-Downtime Enterprise MIS Modernization},
+  author    = {Kumar, Krishan},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.21313169},
+  url       = {https://doi.org/10.5281/zenodo.21313169},
+  note      = {ORCID: 0009-0009-7302-7566}
 }
 ```
 
