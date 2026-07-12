@@ -24,6 +24,27 @@
 
 ---
 
+## ⚠️ POC Only — Not Production Ready
+
+> This code is a **proof-of-concept** built to validate the LDCF architecture
+> and patterns, **not** a production-hardened system. Before using any part
+> of this in a real environment, be aware:
+>
+> - **No warranty or support.** Provided as-is, under Apache 2.0, with no
+>   SLA, maintenance commitment, or guarantee of correctness.
+> - **Security is minimal.** Secrets are managed via AWS Secrets Manager for
+>   demo purposes only — no rotation policy, no least-privilege IAM hardening,
+>   no WAF/network-layer protections beyond basic VPC segmentation.
+> - **No load/scale testing.** Sized for a single-record demo workflow, not
+>   production data volumes or concurrency.
+> - **Costs are your responsibility.** Deploying creates real billable AWS
+>   resources (RDS, DMS, Lambda, etc.) — always run `./cleanup.sh --destroy-all`
+>   when done experimenting.
+> - **Fork and adapt.** Treat this as a reference implementation of the eight
+>   patterns — review, test, and harden thoroughly before any production use.
+
+---
+
 ## About This POC
 
 This proof-of-concept demonstrates the **Live Data Coexistence Framework (LDCF)**
@@ -206,22 +227,32 @@ psql -h $AURORA_HOST -U ldcfadmin -d ldcfdb -c \
 ```
 poc-code/
 ├── README.md
+├── DEPLOYMENT_FAQ.md
 ├── setup/
-│   ├── 01_mysql_legacy_schema.sql      Legacy source schema + seed data
-│   ├── 02_aurora_target_schema.sql     Cloud target schema (insurance + metadata)
-│   ├── 03_metadata_seed.sql            Metadata mappings and rules
-│   └── 04_keyring_oneshot_load.sql     One-time UUID keyring population
+│   ├── 01_mysql_legacy_schema.sql          Legacy source schema + seed data
+│   ├── 02_aurora_target_schema.sql         Cloud target schema (insurance + metadata)
+│   ├── 03_metadata_seed.sql                Metadata mappings and rules
+│   ├── 04_keyring_oneshot_load.sql         One-time UUID keyring population
+│   ├── 05_alter_drop_legacy_columns.sql    Post-cutover legacy column cleanup
+│   ├── 05a_pre_dms_drop_fk_indexes.sql     Drop FKs/indexes before DMS full load
+│   ├── 05b_post_dms_recreate_fk_indexes.sql Recreate FKs/indexes after DMS full load
+│   ├── 06_cdc_test_regular.sql             CDC test — regular (non-transactional) write
+│   ├── 06_cdc_test_transaction.sql         CDC test — transactional write
+│   └── 07_circular_guard_test.sql          Pattern 2 circular replication guard test
 ├── lambda/
 │   ├── 01_claim_check/                 S3 trigger → SQS Claim Check pointer
 │   ├── 02_upstream_loader/             Core engine — all 8 patterns
 │   ├── 03_metadata_service/            Mapping resolver for upstream loader
-│   └── 04_dlq_requeue/                 DLQ retry handler
+│   ├── 04_dlq_requeue/                 DLQ retry handler
+│   └── 05_db_setup/                    Custom resource — runs setup/ SQL during deploy
 └── cloudformation/
     ├── 01_network.yaml                 VPC, subnets, security groups
     ├── 02_databases.yaml               RDS MySQL + Aurora PostgreSQL
     ├── 03_pipeline.yaml                S3, SQS, DynamoDB, SNS
     ├── 04_lambdas.yaml                 All 4 Lambda functions + IAM
     ├── 05_dms.yaml                     DMS instance, endpoints, tasks
+    ├── 06_db_setup.yaml                Custom resource stack for DB setup Lambda
+    ├── deploy.env.example               Template for deploy.env (never commit deploy.env)
     ├── deploy.sh                       Deploy all stacks in order
     └── cleanup.sh                      Pause / resume / destroy
 ```
