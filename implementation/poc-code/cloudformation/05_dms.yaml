@@ -2,37 +2,90 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: |
   LDCF POC Stack 5/5 - AWS DMS
   Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
-  DMS Replication Instance, Source/Target Endpoints, Two Tasks
+  DMS Replication, Source/Target Endpoints, Two Tasks:
+    Task 1 (FullLoad)  -- MySQL  -> PostgreSQL direct (table-to-table)
+    Task 2 (CDC)       -- MySQL  -> S3 CSV (triggers Lambda 1 pipeline)
+  DMSMode parameter selects Provisioned (default) or Serverless.
+  Provisioned: AWS::DMS::ReplicationInstance + AWS::DMS::ReplicationTask
+  Serverless:  AWS::DMS::ReplicationConfig (no instance needed, per-task compute)
 
 Parameters:
   EnvironmentName:
     Type: String
     Default: ldcf-poc
+
   MySQLEndpoint:
     Type: String
-    Description: RDS MySQL endpoint (from stack 2)
+    Description: RDS MySQL endpoint (from stack 2 output)
+
   AuroraEndpoint:
     Type: String
-    Description: Aurora PostgreSQL endpoint (from stack 2)
-  MySQLPassword:
+    Description: Aurora PostgreSQL endpoint (from stack 2 output)
+
+  DMSUserPassword:
     Type: String
     NoEcho: true
-  AuroraPassword:
+    Description: Password for ldcf_dms_user MySQL replication account
+
+  AuroraSecretArn:
     Type: String
-    NoEcho: true
-  DBUsername:
-    Type: String
-    Default: ldcfadmin
+    Description: Secrets Manager ARN for Aurora PostgreSQL credentials
+
   LandingBucketName:
     Type: String
-    Description: S3 landing bucket name (from stack 3)
+    Description: S3 landing bucket name (from stack 3 output)
+
+  # ── DMS Mode ─────────────────────────────────────────────────
+  # Provisioned (default): dedicated replication instance (dms.t3.medium).
+  #   Lower latency, predictable cost, easier to debug. Best for POC.
+  # Serverless: no instance to manage, scales to zero when idle.
+  #   Higher per-DCU cost during bursts, faster to spin up. Good for
+  #   irregular/dev workloads.
+  DMSMode:
+    Type: String
+    Default: Provisioned
+    AllowedValues:
+      - Provisioned
+      - Serverless
+    Description: |
+      Provisioned = dedicated replication instance (dms.t3.medium, ~$0.068/hr).
+      Serverless  = no instance, auto-scales on demand (charged per DCU-hour).
+      Default: Provisioned.
+
+  # ── Provisioned-mode settings (ignored when Serverless) ──────
+  DMSInstanceClass:
+    Type: String
+    Default: dms.t3.medium
+    AllowedValues:
+      - dms.t3.medium
+      - dms.t3.large
+      - dms.r5.large
+    Description: Replication instance class. Only used when DMSMode=Provisioned.
+
+  # ── Serverless-mode settings (ignored when Provisioned) ──────
+  DMSMaxCapacityUnits:
+    Type: Number
+    Default: 4
+    MinValue: 2
+    MaxValue: 384
+    Description: |
+      Max DMS Serverless capacity units (DCUs). 1 DCU ~ 2 GB RAM.
+      2-4 DCUs is enough for this POC. Only used when DMSMode=Serverless.
+
+# ──────────────────────────────────────────────────────────────
+# CONDITIONS
+# ──────────────────────────────────────────────────────────────
+Conditions:
+  IsProvisioned: !Equals [!Ref DMSMode, "Provisioned"]
+  IsServerless:  !Equals [!Ref DMSMode, "Serverless"]
 
 Resources:
-  # ── IAM Role for DMS S3 access ────────────────────────────────
+
+  # ── IAM Role for DMS -> S3 writes ────────────────────────────
   DMSRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${EnvironmentName}-dms-role"
+      RoleName: !Sub "${EnvironmentName}-dms-s3-role"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -40,42 +93,75 @@ Resources:
             Principal: {Service: dms.amazonaws.com}
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: DMSS3Policy
+        - PolicyName: DMSS3WritePolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [s3:PutObject, s3:DeleteObject,
-                         s3:PutObjectTagging, s3:ListBucket]
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:PutObjectTagging
+                  - s3:ListBucket
                 Resource:
                   - !Sub "arn:aws:s3:::${LandingBucketName}"
                   - !Sub "arn:aws:s3:::${LandingBucketName}/*"
 
-  # ── DMS Replication Instance ──────────────────────────────────
-  # dms.t3.micro — lowest cost option
-  DMSReplicationInstance:
-    Type: AWS::DMS::ReplicationInstance
+  # ── IAM Role for DMS -> Secrets Manager (Aurora credentials) ─
+  DMSSecretsRole:
+    Type: AWS::IAM::Role
     Properties:
-      ReplicationInstanceIdentifier: !Sub "${EnvironmentName}-rep-instance"
-      ReplicationInstanceClass: dms.t3.micro
-      AllocatedStorage: 20
-      MultiAZ: false
-      PubliclyAccessible: false
-      ReplicationSubnetGroupIdentifier: !Ref DMSSubnetGroup
-      VpcSecurityGroupIds:
-        - !ImportValue {Fn::Sub: "${EnvironmentName}-db-sg"}
-      Tags:
-        - {Key: Name, Value: !Sub "${EnvironmentName}-dms"}
+      RoleName: !Sub "${EnvironmentName}-dms-secrets-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: dms.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DMSSecretsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Ref AuroraSecretArn
 
+  # ── DMS Subnet Group (used by both modes) ─────────────────────
   DMSSubnetGroup:
     Type: AWS::DMS::ReplicationSubnetGroup
     Properties:
       ReplicationSubnetGroupDescription: LDCF POC DMS subnet group
       SubnetIds:
-        - !ImportValue {Fn::Sub: "${EnvironmentName}-subnet-a"}
-        - !ImportValue {Fn::Sub: "${EnvironmentName}-subnet-b"}
+        - !ImportValue
+          Fn::Sub: "${EnvironmentName}-subnet-a"
+        - !ImportValue
+          Fn::Sub: "${EnvironmentName}-subnet-b"
 
-  # ── Source Endpoint: MySQL ────────────────────────────────────
+  # ══════════════════════════════════════════════════════════════
+  # PROVISIONED MODE RESOURCES (Condition: IsProvisioned)
+  # ══════════════════════════════════════════════════════════════
+
+  # ── DMS Replication Instance (Provisioned only) ───────────────
+  # dms.t3.medium: ~$0.068/hr — run cleanup.sh when not testing
+  # dms.t3.micro retired in DMS engine 3.5+ (see FAQ #8)
+  DMSReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Condition: IsProvisioned
+    Properties:
+      ReplicationInstanceIdentifier: !Sub "${EnvironmentName}-rep-instance"
+      ReplicationInstanceClass: !Ref DMSInstanceClass
+      AllocatedStorage: 20
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationSubnetGroupIdentifier: !Ref DMSSubnetGroup
+      VpcSecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: "${EnvironmentName}-db-sg"
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-dms-instance"}
+
+  # ── Source Endpoint: MySQL (shared by both modes) ────────────
   MySQLSourceEndpoint:
     Type: AWS::DMS::Endpoint
     Properties:
@@ -85,13 +171,35 @@ Resources:
       ServerName: !Ref MySQLEndpoint
       Port: 3306
       DatabaseName: insurance
-      Username: !Ref DBUsername
-      Password: !Ref MySQLPassword
-      ExtraConnectionAttributes: "eventsPollInterval=5;parallelLoadThreads=1"
+      Username: ldcf_dms_user
+      Password: !Ref DMSUserPassword
+      ExtraConnectionAttributes: >-
+        eventsPollInterval=5;
+        initstmt=SET FOREIGN_KEY_CHECKS=0
 
-  # ── Target Endpoint: S3 (CSV output) ─────────────────────────
-  # DMS writes pipe-separated CSV to S3
-  # Lambda 1 (Claim Check) is triggered on each file
+  # ── Target Endpoint 1: PostgreSQL — Full Load (shared by both modes) ──
+  # Uses {{resolve:secretsmanager:...}} — credentials injected at deploy time.
+  # SslMode=require is mandatory — Aurora enforces SSL (rds.force_ssl=1).
+  # See FAQ #18 (PostgreSQLSettings unsupported) and FAQ #22 (SSL error).
+  PostgreSQLTargetEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Sub "${EnvironmentName}-aurora-target"
+      EndpointType: target
+      EngineName: postgres
+      ServerName: !Ref AuroraEndpoint
+      Port: 5432
+      DatabaseName: ldcfdb
+      Username: !Sub "{{resolve:secretsmanager:${AuroraSecretArn}:SecretString:username}}"
+      Password: !Sub "{{resolve:secretsmanager:${AuroraSecretArn}:SecretString:password}}"
+      SslMode: require
+
+  # ── Target Endpoint 2: S3 — CDC (shared by both modes) ──────
+  # PreserveTransactions=true: ONE FILE per committed transaction.
+  # DMS auto-prepends table_name (pos 1) + schema_name (pos 2) to every row.
+  # TimestampColumnName lands at pos 3. MySQL data columns start at pos 4.
+  # DO NOT add transformation rules — they duplicate table/schema at end.
+  # See FAQ #25 for the definitive DMS CSV column layout.
   S3TargetEndpoint:
     Type: AWS::DMS::Endpoint
     Properties:
@@ -101,26 +209,33 @@ Resources:
       S3Settings:
         BucketName: !Ref LandingBucketName
         BucketFolder: dms/sync
+        CdcPath: dms/cdc-control        # Required when PreserveTransactions=true (FAQ #19)
         ServiceAccessRoleArn: !GetAtt DMSRole.Arn
-        # Pipe-separated CSV — no header row
         CsvDelimiter: "|"
         CsvRowDelimiter: "\n"
-        # Include operation type column (COLUMN1 = I/U/D)
         IncludeOpForFullLoad: true
         CdcInsertsAndUpdates: true
-        CdcPath: dms/sync
+        PreserveTransactions: true
+        TimestampColumnName: "event_ts"
+        CdcMaxBatchInterval: 60
+        CdcMinFileSize: 32
 
-  # ── DMS Task 1: Full Load ─────────────────────────────────────
-  # Runs ONCE — copies all existing claim and policy rows
-  # Start manually from console after Task is created
-  # Stop after completion before running keyring load script
+  # ──────────────────────────────────────────────────────────────
+  # PROVISIONED TASKS (Condition: IsProvisioned)
+  # ──────────────────────────────────────────────────────────────
+
+  # ── Provisioned Task 1: Full Load -> PostgreSQL ───────────────
+  # DO_NOTHING + MaxFullLoadSubTasks=1 + load-order avoids FK errors.
+  # See FAQ #23 for full root cause and fix.
   FullLoadTask:
     Type: AWS::DMS::ReplicationTask
+    Condition: IsProvisioned
+    DependsOn: DMSReplicationInstance
     Properties:
       ReplicationTaskIdentifier: !Sub "${EnvironmentName}-fullload"
       ReplicationInstanceArn: !Ref DMSReplicationInstance
       SourceEndpointArn: !Ref MySQLSourceEndpoint
-      TargetEndpointArn: !Ref S3TargetEndpoint
+      TargetEndpointArn: !Ref PostgreSQLTargetEndpoint
       MigrationType: full-load
       TableMappings: |
         {
@@ -128,39 +243,59 @@ Resources:
             {
               "rule-type": "selection",
               "rule-id": "1",
-              "rule-name": "include-insurance-tables",
+              "rule-name": "include-policy",
               "object-locator": {
                 "schema-name": "insurance",
-                "table-name": "%"
+                "table-name": "policy"
               },
-              "rule-action": "include"
+              "rule-action": "include",
+              "load-order": 1
+            },
+            {
+              "rule-type": "selection",
+              "rule-id": "2",
+              "rule-name": "include-claim",
+              "object-locator": {
+                "schema-name": "insurance",
+                "table-name": "claim"
+              },
+              "rule-action": "include",
+              "load-order": 2
             }
           ]
         }
       ReplicationTaskSettings: |
         {
           "TargetMetadata": {
-            "TargetSchema": "",
             "SupportLobs": true,
             "FullLobMode": false,
             "LobChunkSize": 64
           },
           "FullLoadSettings": {
             "TargetTablePrepMode": "DO_NOTHING",
-            "CreatePkAfterFullLoad": false,
-            "StopTaskCachedChangesApplied": false,
-            "StopTaskCachedChangesNotApplied": false,
-            "MaxFullLoadSubTasks": 2,
+            "MaxFullLoadSubTasks": 1,
             "TransactionConsistencyTimeout": 600,
             "CommitRate": 10000
+          },
+          "Logging": {
+            "EnableLogging": true,
+            "LogComponents": [
+              {"Id": "SOURCE_UNLOAD", "Severity": "LOGGER_SEVERITY_DEFAULT"},
+              {"Id": "TARGET_LOAD",   "Severity": "LOGGER_SEVERITY_DEFAULT"},
+              {"Id": "TASK_MANAGER",  "Severity": "LOGGER_SEVERITY_DEFAULT"}
+            ]
           }
         }
 
-  # ── DMS Task 2: CDC Ongoing ───────────────────────────────────
-  # Starts AFTER full load completes AND keyring script runs
-  # Runs continuously — feeds the LDCF upstream pipeline
+  # ── Provisioned Task 2: CDC -> S3 ────────────────────────────
+  # NO transformation rules — DMS PreserveTransactions auto-prepends
+  # table/schema at pos 1/2. Adding rules duplicates them (FAQ #25).
+  # ChangeProcessingTuning omitted — S3 target ignores it and it
+  # caused "Failed to init column" errors when present (FAQ #24).
   CDCTask:
     Type: AWS::DMS::ReplicationTask
+    Condition: IsProvisioned
+    DependsOn: DMSReplicationInstance
     Properties:
       ReplicationTaskIdentifier: !Sub "${EnvironmentName}-cdc"
       ReplicationInstanceArn: !Ref DMSReplicationInstance
@@ -173,10 +308,20 @@ Resources:
             {
               "rule-type": "selection",
               "rule-id": "1",
-              "rule-name": "cdc-insurance-tables",
+              "rule-name": "cdc-policy",
               "object-locator": {
                 "schema-name": "insurance",
-                "table-name": "%"
+                "table-name": "policy"
+              },
+              "rule-action": "include"
+            },
+            {
+              "rule-type": "selection",
+              "rule-id": "2",
+              "rule-name": "cdc-claim",
+              "object-locator": {
+                "schema-name": "insurance",
+                "table-name": "claim"
               },
               "rule-action": "include"
             }
@@ -189,27 +334,169 @@ Resources:
             "FullLobMode": false,
             "LobChunkSize": 64
           },
-          "ChangeProcessingTuning": {
-            "BatchApplyPreserveTransaction": true,
-            "BatchApplyTimeoutMin": 1,
-            "BatchApplyTimeoutMax": 30,
-            "BatchApplyMemoryLimit": 500,
-            "BatchSplitSize": 0
-          },
-          "ChangeProcessingDdlHandlingPolicy": {
-            "EnableDdlReplication": true
-          },
           "Logging": {
-            "EnableLogging": true
+            "EnableLogging": true,
+            "LogComponents": [
+              {"Id": "SOURCE_CAPTURE", "Severity": "LOGGER_SEVERITY_DEFAULT"},
+              {"Id": "TARGET_LOAD",    "Severity": "LOGGER_SEVERITY_DEFAULT"},
+              {"Id": "TASK_MANAGER",   "Severity": "LOGGER_SEVERITY_DEFAULT"}
+            ]
           }
         }
 
+  # ══════════════════════════════════════════════════════════════
+  # SERVERLESS MODE RESOURCES (Condition: IsServerless)
+  # AWS::DMS::ReplicationConfig — no ReplicationInstance needed.
+  # Compute spins up per-task and scales to zero when idle.
+  # TableMappings and ReplicationSettings are JSON objects here
+  # (not strings as in AWS::DMS::ReplicationTask).
+  # Start tasks with: aws dms start-replication (not start-replication-task)
+  # ══════════════════════════════════════════════════════════════
+
+  # ── Serverless Config 1: Full Load -> PostgreSQL ──────────────
+  FullLoadConfig:
+    Type: AWS::DMS::ReplicationConfig
+    Condition: IsServerless
+    Properties:
+      ReplicationConfigIdentifier: !Sub "${EnvironmentName}-fullload"
+      SourceEndpointArn: !Ref MySQLSourceEndpoint
+      TargetEndpointArn: !Ref PostgreSQLTargetEndpoint
+      ReplicationType: full-load
+      ComputeConfig:
+        MaxCapacityUnits: !Ref DMSMaxCapacityUnits
+        MinCapacityUnits: 1
+        MultiAZ: false
+        ReplicationSubnetGroupId: !Ref DMSSubnetGroup
+        VpcSecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${EnvironmentName}-db-sg"
+      TableMappings:
+        rules:
+          - rule-type: selection
+            rule-id: "1"
+            rule-name: include-policy
+            object-locator:
+              schema-name: insurance
+              table-name: policy
+            rule-action: include
+            load-order: 1
+          - rule-type: selection
+            rule-id: "2"
+            rule-name: include-claim
+            object-locator:
+              schema-name: insurance
+              table-name: claim
+            rule-action: include
+            load-order: 2
+      ReplicationSettings:
+        TargetMetadata:
+          SupportLobs: true
+          FullLobMode: false
+          LobChunkSize: 64
+        FullLoadSettings:
+          TargetTablePrepMode: DO_NOTHING
+          MaxFullLoadSubTasks: 1
+          TransactionConsistencyTimeout: 600
+          CommitRate: 10000
+        Logging:
+          EnableLogging: true
+          LogComponents:
+            - Id: SOURCE_UNLOAD
+              Severity: LOGGER_SEVERITY_DEFAULT
+            - Id: TARGET_LOAD
+              Severity: LOGGER_SEVERITY_DEFAULT
+            - Id: TASK_MANAGER
+              Severity: LOGGER_SEVERITY_DEFAULT
+
+  # ── Serverless Config 2: CDC -> S3 ───────────────────────────
+  CDCConfig:
+    Type: AWS::DMS::ReplicationConfig
+    Condition: IsServerless
+    Properties:
+      ReplicationConfigIdentifier: !Sub "${EnvironmentName}-cdc"
+      SourceEndpointArn: !Ref MySQLSourceEndpoint
+      TargetEndpointArn: !Ref S3TargetEndpoint
+      ReplicationType: cdc
+      ComputeConfig:
+        MaxCapacityUnits: !Ref DMSMaxCapacityUnits
+        MinCapacityUnits: 1
+        MultiAZ: false
+        ReplicationSubnetGroupId: !Ref DMSSubnetGroup
+        VpcSecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${EnvironmentName}-db-sg"
+      TableMappings:
+        rules:
+          - rule-type: selection
+            rule-id: "1"
+            rule-name: cdc-policy
+            object-locator:
+              schema-name: insurance
+              table-name: policy
+            rule-action: include
+          - rule-type: selection
+            rule-id: "2"
+            rule-name: cdc-claim
+            object-locator:
+              schema-name: insurance
+              table-name: claim
+            rule-action: include
+      ReplicationSettings:
+        TargetMetadata:
+          SupportLobs: true
+          FullLobMode: false
+          LobChunkSize: 64
+        Logging:
+          EnableLogging: true
+          LogComponents:
+            - Id: SOURCE_CAPTURE
+              Severity: LOGGER_SEVERITY_DEFAULT
+            - Id: TARGET_LOAD
+              Severity: LOGGER_SEVERITY_DEFAULT
+            - Id: TASK_MANAGER
+              Severity: LOGGER_SEVERITY_DEFAULT
+
+# ──────────────────────────────────────────────────────────────
+# OUTPUTS
+# !If selects the correct ARN depending on DMSMode.
+# ──────────────────────────────────────────────────────────────
 Outputs:
+  DMSMode:
+    Value: !Ref DMSMode
+    Description: Active DMS deployment mode (Provisioned or Serverless)
+
   DMSReplicationInstanceArn:
+    Condition: IsProvisioned
     Value: !Ref DMSReplicationInstance
+    Description: DMS Replication Instance ARN (Provisioned mode only)
+
   FullLoadTaskArn:
-    Value: !Ref FullLoadTask
+    Value: !If
+      - IsProvisioned
+      - !Ref FullLoadTask
+      - !Ref FullLoadConfig
     Export: {Name: !Sub "${EnvironmentName}-fullload-task-arn"}
+    Description: |
+      Provisioned: aws dms start-replication-task --start-replication-task-type start-replication --replication-task-arn <value>
+      Serverless:  aws dms start-replication --replication-config-arn <value>
+
   CDCTaskArn:
-    Value: !Ref CDCTask
+    Value: !If
+      - IsProvisioned
+      - !Ref CDCTask
+      - !Ref CDCConfig
     Export: {Name: !Sub "${EnvironmentName}-cdc-task-arn"}
+    Description: |
+      Provisioned: aws dms start-replication-task --start-replication-task-type start-replication --replication-task-arn <value>
+      Serverless:  aws dms start-replication --replication-config-arn <value>
+
+  S3LandingPath:
+    Value: !Sub "s3://${LandingBucketName}/dms/sync/"
+    Description: DMS CDC writes CSV files here. Lambda 1 triggers on each file.
+
+  StartCommandHint:
+    Value: !If
+      - IsProvisioned
+      - "aws dms start-replication-task --start-replication-task-type start-replication --replication-task-arn <CDCTaskArn>"
+      - "aws dms start-replication --replication-config-arn <CDCTaskArn>"
+    Description: CLI command to start the CDC task/config after full load completes.

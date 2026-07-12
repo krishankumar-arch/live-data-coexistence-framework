@@ -15,7 +15,7 @@ CONVERSION_METHOD values:
   NULL_TO_BLANK       — None/empty → ''
   NULL_TO_ZERO        — None/empty → 0
   NULL_TO_DATE        — None/empty → default date (from conversion_format_txt)
-  LEGACY_REF          — copy source PK/FK as legacy reference column
+  LEGACY_REF          — pass integer PK/FK value through as-is (preserves MySQL id)
   UPPERCASE           — apply UPPER()
   TRIM                — apply TRIM()
   SKIP                — exclude column from DML entirely
@@ -113,9 +113,10 @@ def _null_to_date(value: Any, fmt: Optional[str] = None) -> Optional[date]:
 
 def _legacy_ref(value: Any, fmt: Optional[str] = None) -> Any:
     """
-    Copy source PK/FK as legacy reference column.
-    Used for claim_id → legacy_claim_id, policy_id → legacy_policy_id.
-    Passes value through unchanged — preserves integer type.
+    Pass integer PK/FK values from source to target unchanged.
+    Used for policy_id → policy_id, claim_id → claim_id, and FK columns.
+    Ensures the MySQL-originated integer id is stored exactly as received —
+    the ODD-sequence DEFAULT is only used when the caller omits the value.
     """
     if value is None or str(value).strip() in ('', 'NULL'):
         return None

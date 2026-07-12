@@ -87,18 +87,28 @@ VALUES
     ('POL-2024-0004', 'Initech Group',        'HEALTH', '2024-04-01', '2025-04-01', 3200.00),
     ('POL-2024-0005', 'Umbrella Holdings',    'HOME',   '2024-05-01', '2025-05-01',  975.00);
 
+-- Lookup actual generated policy_ids by policy_num (robust — not hardcoded)
+-- With auto_increment_increment=2, auto_increment_offset=2 the IDs will be
+-- 1000000, 1000002, 1000004, 1000006, 1000008 (even) as intended by Pattern 1.
+-- Using variables avoids FK failures if the offset ever differs.
+SET @pol1 = (SELECT policy_id FROM policy WHERE policy_num = 'POL-2024-0001');
+SET @pol2 = (SELECT policy_id FROM policy WHERE policy_num = 'POL-2024-0002');
+SET @pol3 = (SELECT policy_id FROM policy WHERE policy_num = 'POL-2024-0003');
+SET @pol4 = (SELECT policy_id FROM policy WHERE policy_num = 'POL-2024-0004');
+SET @pol5 = (SELECT policy_id FROM policy WHERE policy_num = 'POL-2024-0005');
+
 INSERT INTO claim (claim_num, policy_id, policy_num,
                    claimant_name, claim_amount, claim_status, incident_date)
 VALUES
-    ('CLM-2024-0001', 1000000, 'POL-2024-0001', 'J. Smith',     5000.00, 'OPEN',         '2024-06-01'),
-    ('CLM-2024-0002', 1000000, 'POL-2024-0001', 'J. Smith',     1200.00, 'APPROVED',     '2024-07-15'),
-    ('CLM-2024-0003', 1000002, 'POL-2024-0002', 'J. Doe',       8500.00, 'UNDER_REVIEW', '2024-08-01'),
-    ('CLM-2024-0004', 1000004, 'POL-2024-0003', 'R. Johnson',   3200.00, 'OPEN',         '2024-08-20'),
-    ('CLM-2024-0005', 1000006, 'POL-2024-0004', 'A. Williams', 15000.00, 'APPROVED',     '2024-09-01'),
-    ('CLM-2024-0006', 1000006, 'POL-2024-0004', 'A. Williams',  4500.00, 'REJECTED',     '2024-09-15'),
-    ('CLM-2024-0007', 1000008, 'POL-2024-0005', 'C. Brown',     2800.00, 'CLOSED',       '2024-10-01'),
-    ('CLM-2024-0008', 1000000, 'POL-2024-0001', 'J. Smith',      900.00, 'OPEN',         '2024-10-20'),
-    ('CLM-2024-0009', 1000002, 'POL-2024-0002', 'J. Doe',       6700.00, 'UNDER_REVIEW', '2024-11-01'),
-    ('CLM-2024-0010', 1000004, 'POL-2024-0003', 'R. Johnson',   1100.00, 'APPROVED',     '2024-11-15');
+    ('CLM-2024-0001', @pol1, 'POL-2024-0001', 'J. Smith',     5000.00, 'OPEN',         '2024-06-01'),
+    ('CLM-2024-0002', @pol1, 'POL-2024-0001', 'J. Smith',     1200.00, 'APPROVED',     '2024-07-15'),
+    ('CLM-2024-0003', @pol2, 'POL-2024-0002', 'J. Doe',       8500.00, 'UNDER_REVIEW', '2024-08-01'),
+    ('CLM-2024-0004', @pol3, 'POL-2024-0003', 'R. Johnson',   3200.00, 'OPEN',         '2024-08-20'),
+    ('CLM-2024-0005', @pol4, 'POL-2024-0004', 'A. Williams', 15000.00, 'APPROVED',     '2024-09-01'),
+    ('CLM-2024-0006', @pol4, 'POL-2024-0004', 'A. Williams',  4500.00, 'REJECTED',     '2024-09-15'),
+    ('CLM-2024-0007', @pol5, 'POL-2024-0005', 'C. Brown',     2800.00, 'CLOSED',       '2024-10-01'),
+    ('CLM-2024-0008', @pol1, 'POL-2024-0001', 'J. Smith',      900.00, 'OPEN',         '2024-10-20'),
+    ('CLM-2024-0009', @pol2, 'POL-2024-0002', 'J. Doe',       6700.00, 'UNDER_REVIEW', '2024-11-01'),
+    ('CLM-2024-0010', @pol3, 'POL-2024-0003', 'R. Johnson',   1100.00, 'APPROVED',     '2024-11-15');
 
 -- Verify: SELECT policy_id, policy_id % 2 AS must_be_zero FROM policy LIMIT 5;

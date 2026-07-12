@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: |
   LDCF POC Stack 3/5 - Event Pipeline
   Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
-  S3 landing, SQS queues, DynamoDB audit table, SNS alerts
+  S3 landing, SQS queues, DynamoDB audit/utilization/fault tables, SNS alerts
 
 Parameters:
   EnvironmentName:
@@ -53,6 +53,7 @@ Resources:
         - {Key: Pattern, Value: "LDCF-Claim-Check-Pattern"}
 
   # ── DynamoDB Audit Table ──────────────────────────────────────
+  # Full replication event log -- used by Lambda 2 for reprocessing capability
   AuditTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -78,6 +79,44 @@ Resources:
       Tags:
         - {Key: Name,    Value: !Sub "${EnvironmentName}-audit"}
         - {Key: Pattern, Value: "LDCF-Pattern-5-tiered-TTL"}
+
+  # ── DynamoDB Utilization Table ────────────────────────────────
+  # Tracks SUCCESS and SKIP events per Lambda step.
+  # Written by all 4 Lambdas on every successful or intentional-skip code path.
+  # PK: event_id   SK: lambda_step ("lambda_name#step_number")
+  UtilizationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-utilization"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - {AttributeName: event_id,    KeyType: HASH}
+        - {AttributeName: lambda_step, KeyType: RANGE}
+      AttributeDefinitions:
+        - {AttributeName: event_id,    AttributeType: S}
+        - {AttributeName: lambda_step, AttributeType: S}
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-utilization"}
+        - {Key: Purpose, Value: "LDCF-success-skip-per-step-audit"}
+
+  # ── DynamoDB Fault Table ──────────────────────────────────────
+  # Tracks FAILED, PERMANENT_FAILED, DLQ events per Lambda step.
+  # Written by all 4 Lambdas on every error code path.
+  # PK: event_id   SK: lambda_step ("lambda_name#step_number")
+  FaultTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-fault"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - {AttributeName: event_id,    KeyType: HASH}
+        - {AttributeName: lambda_step, KeyType: RANGE}
+      AttributeDefinitions:
+        - {AttributeName: event_id,    AttributeType: S}
+        - {AttributeName: lambda_step, AttributeType: S}
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-fault"}
+        - {Key: Purpose, Value: "LDCF-error-per-step-audit"}
 
   # ── SNS Alert Topic ───────────────────────────────────────────
   AlertTopic:
@@ -116,6 +155,14 @@ Outputs:
   AuditTableName:
     Value: !Ref AuditTable
     Export: {Name: !Sub "${EnvironmentName}-audit-table"}
+
+  UtilizationTableName:
+    Value: !Ref UtilizationTable
+    Export: {Name: !Sub "${EnvironmentName}-utilization-table"}
+
+  FaultTableName:
+    Value: !Ref FaultTable
+    Export: {Name: !Sub "${EnvironmentName}-fault-table"}
 
   AlertTopicArn:
     Value: !Ref AlertTopic

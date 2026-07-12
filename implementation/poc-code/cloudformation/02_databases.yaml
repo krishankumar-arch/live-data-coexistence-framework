@@ -41,12 +41,18 @@ Resources:
   MySQLParamGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      Description: LDCF POC MySQL params — enables CDC for DMS
+      Description: LDCF POC MySQL params - enables CDC for DMS
       Family: mysql8.0
       Parameters:
-        binlog_format:    ROW
-        binlog_row_image: FULL
-        binlog_checksum:  NONE
+        binlog_format:          ROW
+        binlog_row_image:       FULL
+        binlog_checksum:        NONE
+        # PATTERN 1: MySQL generates EVEN keys only (legacy side)
+        # Aurora uses ODD sequences → dual-sequence key partitioning
+        # offset=2 + increment=2 → sequence: 1000000, 1000002, 1000004 (even)
+        # offset=1 (default) + increment=2 → sequence: 1000001, 1000003 (odd - wrong!)
+        auto_increment_increment: "2"
+        auto_increment_offset:   "2"
 
   MySQLInstance:
     Type: AWS::RDS::DBInstance
@@ -61,7 +67,7 @@ Resources:
       DBName: insurance
       AllocatedStorage: "20"
       StorageType: gp2
-      PubliclyAccessible: false
+      PubliclyAccessible: true   # Enables DBeaver + db_setup Lambda access
       MultiAZ: false
       DBSubnetGroupName: !ImportValue
         Fn::Sub: "${EnvironmentName}-db-subnet-group"
@@ -74,39 +80,34 @@ Resources:
         - {Key: Name,    Value: !Sub "${EnvironmentName}-mysql-legacy"}
         - {Key: Pattern, Value: "LDCF-Pattern-1-even-sequences"}
 
-  # ── Aurora PostgreSQL Serverless v2 — Cloud Target ───────────
-  # Scales to 0.5 ACU minimum (near-zero cost when idle)
-  AuroraCluster:
-    Type: AWS::RDS::DBCluster
+  # ── RDS PostgreSQL — Cloud Target ────────────────────────────
+  # db.t3.micro free-tier eligible; replaces Aurora Serverless v2
+  # (WithExpressConfiguration is an API-only flag, not valid in CloudFormation)
+  # Output names kept identical so downstream stacks need no changes.
+  PostgreSQLInstance:
+    Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
     Properties:
-      DBClusterIdentifier: !Sub "${EnvironmentName}-aurora-target"
-      Engine: aurora-postgresql
-      EngineVersion: "15.4"
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-aurora-target"
+      DBInstanceClass: db.t3.micro        # free tier eligible
+      Engine: postgres
+      EngineVersion: "15"
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
-      DatabaseName: ldcfdb
+      DBName: ldcfdb
+      AllocatedStorage: "20"
+      StorageType: gp2
+      PubliclyAccessible: true   # Enables DBeaver + db_setup Lambda access
+      MultiAZ: false
       DBSubnetGroupName: !ImportValue
         Fn::Sub: "${EnvironmentName}-db-subnet-group"
-      VpcSecurityGroupIds:
+      VPCSecurityGroups:
         - !ImportValue
           Fn::Sub: "${EnvironmentName}-db-sg"
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: 0.5   # minimum ACU — near-zero cost when idle
-        MaxCapacity: 4     # sufficient for POC load
       BackupRetentionPeriod: 1
       Tags:
         - {Key: Name,    Value: !Sub "${EnvironmentName}-aurora-target"}
         - {Key: Pattern, Value: "LDCF-Pattern-1-odd-sequences"}
-
-  AuroraInstance:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBClusterIdentifier: !Ref AuroraCluster
-      DBInstanceIdentifier: !Sub "${EnvironmentName}-aurora-instance"
-      DBInstanceClass: db.serverless
-      Engine: aurora-postgresql
-      PubliclyAccessible: false
 
 Outputs:
   MySQLEndpoint:
@@ -114,7 +115,7 @@ Outputs:
     Export: {Name: !Sub "${EnvironmentName}-mysql-endpoint"}
 
   AuroraEndpoint:
-    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Value: !GetAtt PostgreSQLInstance.Endpoint.Address
     Export: {Name: !Sub "${EnvironmentName}-aurora-endpoint"}
 
   MySQLSecretArn:

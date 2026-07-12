@@ -2,14 +2,27 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: |
   LDCF POC Stack 1/5 - Network Infrastructure
   Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
-  VPC, subnets, security groups for LDCF POC.
+  VPC, public/private subnets, NAT Gateway, VPC endpoints,
+  and security groups for LDCF POC.
+  SubnetA = public  (NAT Gateway lives here, DMS uses this)
+  SubnetB = private (Lambda 2 + 3 + databases live here)
 
 Parameters:
   EnvironmentName:
     Type: String
     Default: ldcf-poc
 
+  # Your public IP in CIDR notation for DBeaver access, e.g. 203.0.113.10/32
+  # Default 0.0.0.0/0 opens to internet — restrict to your IP for better security
+  AllowedCIDR:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: >
+      CIDR allowed to connect to MySQL (3306) and Aurora (5432) for DBeaver.
+      Use your IP: curl ifconfig.me → e.g. 203.0.113.10/32
+
 Resources:
+  # ── VPC ───────────────────────────────────────────────────────
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -18,22 +31,40 @@ Resources:
       EnableDnsSupport: true
       Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-vpc"}]
 
+  # ── Subnets ───────────────────────────────────────────────────
+  # SubnetA: public — NAT Gateway, DMS replication instance
   SubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
-      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-subnet-a"}]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-subnet-a-public"}]
 
+  # SubnetB: private — Lambda 2/3 (databases must NOT use this subnet)
   SubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
-      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-subnet-b"}]
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-subnet-b-private"}]
 
+  # SubnetC: public — second AZ for DBSubnetGroup (ensures RDS always lands public)
+  # RDS requires >= 2 subnets in different AZs; both SubnetA + SubnetC are public
+  # so DBeaver can always connect regardless of which AZ RDS chooses.
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-subnet-c-public-db"}]
+
+  # ── Internet Gateway ──────────────────────────────────────────
   InternetGateway:
     Type: AWS::EC2::InternetGateway
 
@@ -43,34 +74,95 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  RouteTable:
+  # ── Public Route Table (SubnetA → IGW) ───────────────────────
+  PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-rt-public"}]
 
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: VPCGatewayAttachment
     Properties:
-      RouteTableId: !Ref RouteTable
+      RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
   SubnetARouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: {SubnetId: !Ref SubnetA, RouteTableId: !Ref RouteTable}
+    Properties: {SubnetId: !Ref SubnetA, RouteTableId: !Ref PublicRouteTable}
+
+  SubnetCRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetC, RouteTableId: !Ref PublicRouteTable}
+
+  # ── NAT Gateway (in SubnetA, used by private SubnetB) ────────
+  # Allows Lambda 2/3 to reach SQS, Secrets Manager, Lambda service
+  # Cost: ~$1.08/day (pause with cleanup.sh when not testing)
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref SubnetA
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-nat"}]
+
+  # ── Private Route Table (SubnetB → NAT) ──────────────────────
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-rt-private"}]
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
 
   SubnetBRouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: {SubnetId: !Ref SubnetB, RouteTableId: !Ref RouteTable}
+    Properties: {SubnetId: !Ref SubnetB, RouteTableId: !Ref PrivateRouteTable}
 
-  # Security group for RDS and Aurora
+  # ── VPC Gateway Endpoints (FREE — high volume services) ──────
+  # S3: DMS writes CSV here; Lambda 2 reads CSV from here
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  # DynamoDB: Lambda 2 writes audit records here
+  DynamoDBVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  # ── Security Groups ───────────────────────────────────────────
+  # Allows DB access from within the VPC AND from AllowedCIDR (DBeaver)
   DatabaseSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Database access for LDCF POC
       VpcId: !Ref VPC
       SecurityGroupIngress:
+        # VPC-internal access (Lambda 2/3, DMS, within-VPC tools)
         - IpProtocol: tcp
           FromPort: 3306
           ToPort: 3306
@@ -79,9 +171,18 @@ Resources:
           FromPort: 5432
           ToPort: 5432
           CidrIp: 10.0.0.0/16
+        # Public access for DBeaver — restrict AllowedCIDR to your IP in prod
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedCIDR
       Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-db-sg"}]
 
-  # Security group for Lambda
+  # Lambda outbound: all traffic (VPC endpoints + NAT handle routing)
   LambdaSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -96,12 +197,37 @@ Resources:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: LDCF POC DB subnet group
-      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      # SubnetA (us-east-1a, public) + SubnetC (us-east-1b, public)
+      # Both public — ensures RDS instances are always DBeaver-accessible.
+      # SubnetB (private) intentionally excluded from DB subnet group.
+      SubnetIds: [!Ref SubnetA, !Ref SubnetC]
 
 Outputs:
-  VpcId:          {Value: !Ref VPC,          Export: {Name: !Sub "${EnvironmentName}-vpc-id"}}
-  SubnetAId:      {Value: !Ref SubnetA,      Export: {Name: !Sub "${EnvironmentName}-subnet-a"}}
-  SubnetBId:      {Value: !Ref SubnetB,      Export: {Name: !Sub "${EnvironmentName}-subnet-b"}}
-  DatabaseSGId:   {Value: !Ref DatabaseSG,   Export: {Name: !Sub "${EnvironmentName}-db-sg"}}
-  LambdaSGId:     {Value: !Ref LambdaSG,     Export: {Name: !Sub "${EnvironmentName}-lambda-sg"}}
-  DBSubnetGroup:  {Value: !Ref DBSubnetGroup, Export: {Name: !Sub "${EnvironmentName}-db-subnet-group"}}
+  VpcId:
+    Value: !Ref VPC
+    Export: {Name: !Sub "${EnvironmentName}-vpc-id"}
+  SubnetAId:
+    Value: !Ref SubnetA
+    Export: {Name: !Sub "${EnvironmentName}-subnet-a"}
+  SubnetBId:
+    Value: !Ref SubnetB
+    Export: {Name: !Sub "${EnvironmentName}-subnet-b"}
+  SubnetCId:
+    Value: !Ref SubnetC
+    Export: {Name: !Sub "${EnvironmentName}-subnet-c"}
+  # PrivateSubnetId = SubnetB — used by Lambda 2, Lambda 3, and db-setup VpcConfig
+  PrivateSubnetId:
+    Value: !Ref SubnetB
+    Export: {Name: !Sub "${EnvironmentName}-private-subnet"}
+  DatabaseSGId:
+    Value: !Ref DatabaseSG
+    Export: {Name: !Sub "${EnvironmentName}-db-sg"}
+  LambdaSGId:
+    Value: !Ref LambdaSG
+    Export: {Name: !Sub "${EnvironmentName}-lambda-sg"}
+  DBSubnetGroup:
+    Value: !Ref DBSubnetGroup
+    Export: {Name: !Sub "${EnvironmentName}-db-subnet-group"}
+  NatGatewayId:
+    Value: !Ref NatGateway
+    Description: NAT Gateway for private subnet outbound (Lambda → SQS/SecretsManager)

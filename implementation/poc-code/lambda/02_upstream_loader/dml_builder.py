@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 # Methods where column is excluded from INSERT — DB generates the value
 DB_GENERATED = {'UUID_GENERATE', 'SKIP'}
 
+# Source-side system fields used only by LDCF integrity patterns.
+# These are read from the CSV into row_dict for pattern checks (e.g. Pattern 2
+# Circular Replication Guard reads datasync_flag to decide whether to skip a row)
+# but must NEVER be written to the target Aurora table.
+# Add field names here to keep them available for pattern checks while
+# excluding them from all generated INSERT / UPDATE / DELETE statements.
+SYSTEM_ONLY_FIELDS = {'datasync_flag'}
+
 
 def build_insert_upsert(
     mapping:    Dict,
@@ -63,6 +71,13 @@ def build_insert_upsert(
             logger.debug(f"Excluding column {dst_col} (method={method})")
             continue
 
+        # Exclude system-only fields used by LDCF pattern checks.
+        # datasync_flag is read from the CSV for Pattern 2 Circular Guard
+        # but must not be written to the target table.
+        if src_col in SYSTEM_ONLY_FIELDS:
+            logger.debug(f"Excluding system field {src_col} from target DML")
+            continue
+
         raw_value   = event_data.get(src_col)
         transformed = apply_conversion(method, raw_value, fmt)
 
@@ -77,13 +92,15 @@ def build_insert_upsert(
     placeholders  = ', '.join(['%s'] * len(columns))
     conflict_cols = ', '.join(dstn_pks)
 
-    # Build SET clause — update all non-PK columns + refresh last_modified
+    # Build SET clause — update all non-PK columns using source values.
+    # last_modified comes from the source row (via EXCLUDED) — do NOT
+    # override it with NOW(). The source timestamp is the authoritative
+    # last-write value for Pattern 3 (Last-Write-Wins).
     set_parts = [
         f"{col} = EXCLUDED.{col}"
         for col in columns
         if col not in dstn_pks
     ]
-    set_parts.append("last_modified = NOW()")
     set_clause = ', '.join(set_parts)
 
     sql = (
@@ -120,6 +137,11 @@ def build_delete(
     params      = []
 
     for src_pk, dst_pk in zip(src_pks, dstn_pks):
+        # System-only fields are never valid PK columns — skip defensively
+        if src_pk in SYSTEM_ONLY_FIELDS:
+            logger.debug(f"Skipping system field {src_pk} in DELETE WHERE clause")
+            continue
+
         # Find the rule for this PK field to apply correct conversion
         pk_rule = next(
             (r for r in rules if r['src_field_name'] == src_pk), None

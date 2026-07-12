@@ -48,10 +48,9 @@ END $$;
 -- ON CONFLICT = idempotent (safe to re-run)
 -- ─────────────────────────────────────────────
 INSERT INTO insurance.policy_keyring
-    (legacy_policy_num, legacy_policy_id)
+    (legacy_policy_num)
 SELECT
-    policy_num,
-    legacy_policy_id
+    policy_num
 FROM insurance.policy
 ON CONFLICT (legacy_policy_num) DO NOTHING;
 
@@ -70,10 +69,9 @@ END $$;
 -- ON CONFLICT = idempotent (safe to re-run)
 -- ─────────────────────────────────────────────
 INSERT INTO insurance.claim_keyring
-    (legacy_claim_num, legacy_claim_id)
+    (legacy_claim_num)
 SELECT
-    claim_num,
-    legacy_claim_id
+    claim_num
 FROM insurance.claim
 ON CONFLICT (legacy_claim_num) DO NOTHING;
 
@@ -104,7 +102,7 @@ UNION ALL SELECT
 SELECT
     p.policy_num,
     pk.policy_uuid,
-    pk.legacy_policy_id
+    pk.legacy_policy_num
 FROM insurance.policy p
 JOIN insurance.policy_keyring pk ON pk.legacy_policy_num = p.policy_num
 LIMIT 3;

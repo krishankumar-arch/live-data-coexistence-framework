@@ -1,0 +1,45 @@
+# AWS credentials — NEVER commit these
+.aws/
+*.pem
+*.key
+credentials
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+.pytest_cache/
+
+# Lambda build artifacts
+*.zip
+lambda_packages/
+
+# CloudFormation deployment state
+.cfn-deploy/
+packaged-*.yaml
+
+# Environment files
+.env
+.env.*
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (draw.io export tools)
+node_modules/
+
+# Temporary
+tmp/
+temp/
+*.tmp

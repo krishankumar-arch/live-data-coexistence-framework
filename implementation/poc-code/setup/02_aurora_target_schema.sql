@@ -7,6 +7,12 @@
 --   metadata   — mapping engine (connection_registry, map_master, rules)
 --
 -- PATTERN 1: ODD sequences = cloud-generated records
+--   policy_id / claim_id use ODD sequences so cloud-native records
+--   never collide with MySQL-originated EVEN auto_increment IDs.
+--   When the legacy system passes its own id (e.g. policy_id=1000026),
+--   that value is stored directly — sequence is only used for new
+--   cloud-originated records that have no legacy counterpart.
+--
 -- PATTERN 7: gen_random_uuid() for PII tokenization
 --            UNIQUE on legacy_*_num = idempotency guard on keyring tables
 -- ═══════════════════════════════════════════════════════════════
@@ -22,6 +28,9 @@ CREATE SCHEMA IF NOT EXISTS metadata;
 
 -- ─────────────────────────────────────────────
 -- SEQUENCES — ODD numbers only (Pattern 1)
+-- Used only when no id is supplied by the caller.
+-- MySQL auto_increment generates EVEN numbers so
+-- cloud-originated records (ODD) never collide.
 -- ─────────────────────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS insurance.policy_id_seq        INCREMENT 2 START 1000001 MINVALUE 1;
 CREATE SEQUENCE IF NOT EXISTS insurance.claim_id_seq         INCREMENT 2 START 2000001 MINVALUE 1;
@@ -33,6 +42,11 @@ CREATE SEQUENCE IF NOT EXISTS metadata.conn_id_seq           INCREMENT 1 START 1
 
 -- ─────────────────────────────────────────────
 -- INSURANCE.POLICY
+-- policy_id accepts the MySQL value when supplied by the legacy system
+-- (e.g. policy_id=1000026 from DMS CDC).  When no value is provided
+-- (cloud-native record), DEFAULT nextval generates the next ODD id.
+-- No separate legacy_policy_id column is needed — policy_id IS the
+-- single identity for both cloud and legacy records.
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS insurance.policy (
     policy_id           BIGINT          NOT NULL DEFAULT nextval('insurance.policy_id_seq'),
@@ -42,19 +56,21 @@ CREATE TABLE IF NOT EXISTS insurance.policy (
     effective_date      DATE            NOT NULL,
     expiry_date         DATE            NOT NULL,
     premium_amount      NUMERIC(12,2)   NOT NULL DEFAULT 0.00,
-    legacy_policy_id    BIGINT          NULL,
     created_at          TIMESTAMP       NOT NULL DEFAULT NOW(),
     last_modified       TIMESTAMP       NOT NULL DEFAULT NOW(),
     datasync_flag       VARCHAR(10)     NULL,
     CONSTRAINT pk_ins_policy         PRIMARY KEY (policy_id),
-    CONSTRAINT uq_ins_policy_num     UNIQUE (policy_num),
-    CONSTRAINT uq_ins_legacy_pol_id  UNIQUE (legacy_policy_id)
+    CONSTRAINT uq_ins_policy_num     UNIQUE (policy_num)
 );
-COMMENT ON TABLE  insurance.policy IS 'Cloud policy. ODD policy_id = cloud origin (LDCF Pattern 1).';
-COMMENT ON COLUMN insurance.policy.legacy_policy_id IS 'Source MySQL policy_id. Coexistence traceability.';
+COMMENT ON TABLE  insurance.policy IS 'Cloud policy. ODD policy_id = cloud origin; EVEN policy_id = legacy origin (LDCF Pattern 1).';
+COMMENT ON COLUMN insurance.policy.policy_id IS
+    'Unified PK. MySQL supplies EVEN values via CDC; cloud generates ODD values via sequence.';
 
 -- ─────────────────────────────────────────────
 -- INSURANCE.CLAIM
+-- claim_id accepts the MySQL value when supplied by the legacy system.
+-- claim.policy_id is a FK to policy.policy_id — works correctly because
+-- both columns now store the same value space (MySQL EVEN ids or ODD cloud ids).
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS insurance.claim (
     claim_id            BIGINT          NOT NULL DEFAULT nextval('insurance.claim_id_seq'),
@@ -65,21 +81,25 @@ CREATE TABLE IF NOT EXISTS insurance.claim (
     claim_amount        NUMERIC(12,2)   NOT NULL DEFAULT 0.00,
     claim_status        VARCHAR(30)     NOT NULL DEFAULT 'OPEN',
     incident_date       DATE            NULL,
-    legacy_claim_id     BIGINT          NULL,
     created_at          TIMESTAMP       NOT NULL DEFAULT NOW(),
     last_modified       TIMESTAMP       NOT NULL DEFAULT NOW(),
     datasync_flag       VARCHAR(10)     NULL,
     CONSTRAINT pk_ins_claim          PRIMARY KEY (claim_id),
     CONSTRAINT uq_ins_claim_num      UNIQUE (claim_num),
-    CONSTRAINT uq_ins_legacy_clm_id  UNIQUE (legacy_claim_id),
+    -- claim.policy_id stores the MySQL policy_id (EVEN) or cloud policy_id (ODD).
+    -- References policy.policy_id directly — no legacy indirection needed.
     CONSTRAINT fk_ins_claim_policy   FOREIGN KEY (policy_id)
                                      REFERENCES insurance.policy(policy_id)
                                      ON UPDATE CASCADE ON DELETE RESTRICT
 );
+COMMENT ON COLUMN insurance.claim.claim_id IS
+    'Unified PK. MySQL supplies EVEN values via CDC; cloud generates ODD values via sequence.';
+COMMENT ON COLUMN insurance.claim.policy_id IS
+    'FK to insurance.policy.policy_id. Stores MySQL policy_id for legacy rows.';
 
 -- ─────────────────────────────────────────────
 -- INSURANCE.POLICY_KEYRING — PII tokenization vault
--- Maps legacy_policy_num → UUID
+-- Maps policy_num → UUID (policy_uuid)
 -- All new Domain APIs use policy_uuid exclusively
 -- UNIQUE on legacy_policy_num = idempotency guard (Pattern 5)
 -- ─────────────────────────────────────────────
@@ -87,33 +107,31 @@ CREATE TABLE IF NOT EXISTS insurance.policy_keyring (
     keyring_id          BIGINT          NOT NULL DEFAULT nextval('insurance.policy_keyring_id_seq'),
     policy_uuid         UUID            NOT NULL DEFAULT gen_random_uuid(),
     legacy_policy_num   VARCHAR(50)     NOT NULL,
-    legacy_policy_id    BIGINT          NULL,
     created_at          TIMESTAMP       NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_policy_keyring           PRIMARY KEY (keyring_id),
     CONSTRAINT uq_policy_uuid              UNIQUE (policy_uuid),
     CONSTRAINT uq_policy_keyring_leg_num   UNIQUE (legacy_policy_num)
 );
 COMMENT ON TABLE insurance.policy_keyring IS
-    'PII vault. legacy_policy_num → policy_uuid. '
+    'PII vault. policy_num → policy_uuid. '
     'UNIQUE on legacy_policy_num = idempotency guard on retry (Pattern 5). '
     'All Domain APIs use policy_uuid only.';
 
 -- ─────────────────────────────────────────────
 -- INSURANCE.CLAIM_KEYRING — PII tokenization vault
--- Maps legacy_claim_num → UUID
+-- Maps claim_num → UUID (claim_uuid)
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS insurance.claim_keyring (
     keyring_id          BIGINT          NOT NULL DEFAULT nextval('insurance.claim_keyring_id_seq'),
     claim_uuid          UUID            NOT NULL DEFAULT gen_random_uuid(),
     legacy_claim_num    VARCHAR(50)     NOT NULL,
-    legacy_claim_id     BIGINT          NULL,
     created_at          TIMESTAMP       NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_claim_keyring            PRIMARY KEY (keyring_id),
     CONSTRAINT uq_claim_uuid               UNIQUE (claim_uuid),
     CONSTRAINT uq_claim_keyring_leg_num    UNIQUE (legacy_claim_num)
 );
 COMMENT ON TABLE insurance.claim_keyring IS
-    'PII vault. legacy_claim_num → claim_uuid. '
+    'PII vault. claim_num → claim_uuid. '
     'UNIQUE on legacy_claim_num = idempotency guard on retry (Pattern 5). '
     'All Domain APIs use claim_uuid only.';
 
@@ -202,8 +220,6 @@ COMMENT ON TABLE metadata.metadata_rules IS
 -- ─────────────────────────────────────────────
 -- INDEXES
 -- ─────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_claim_legacy_id         ON insurance.claim(legacy_claim_id);
-CREATE INDEX IF NOT EXISTS idx_policy_legacy_id        ON insurance.policy(legacy_policy_id);
 CREATE INDEX IF NOT EXISTS idx_claim_kr_legacy_num     ON insurance.claim_keyring(legacy_claim_num);
 CREATE INDEX IF NOT EXISTS idx_policy_kr_legacy_num    ON insurance.policy_keyring(legacy_policy_num);
 CREATE INDEX IF NOT EXISTS idx_map_src                 ON metadata.metadata_map_master(src_schema_nam, src_tbl_nam) WHERE is_active = true;

@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  LDCF POC Stack 6/6 - Automated DB Setup (CloudFormation Custom Resource)
+  Author: Krishan Kumar | ORCID: 0009-0009-7302-7566
+  Runs all 4 SQL setup scripts automatically during deploy.sh.
+  Replaces MANUAL STEP 1 entirely. Lambda runs inside VPC (private subnet)
+  so it reaches databases via VPC-internal routing regardless of which subnet
+  RDS placed the instances in. Delete is a no-op — databases are never dropped.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ldcf-poc
+
+  MySQLEndpoint:
+    Type: String
+    Description: RDS MySQL public endpoint (from stack 2 output)
+
+  AuroraEndpoint:
+    Type: String
+    Description: Aurora PostgreSQL cluster endpoint (from stack 2 output)
+
+  MySQLSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for MySQL admin credentials
+
+  AuroraSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for Aurora admin credentials
+
+  DMSSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for DMS replication user password
+
+  DeployBucket:
+    Type: String
+    Description: S3 bucket holding Lambda ZIPs and sql/ scripts
+
+Resources:
+
+  # ── IAM Role for DB Setup Lambda ─────────────────────────────
+  DBSetupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-db-setup-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DBSetupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3: read SQL scripts from deploy bucket
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource: !Sub "arn:aws:s3:::${DeployBucket}/sql/*"
+              # Secrets Manager: read all three DB secrets
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource:
+                  - !Ref MySQLSecretArn
+                  - !Ref AuroraSecretArn
+                  - !Ref DMSSecretArn
+
+  # ── DB Setup Lambda ───────────────────────────────────────────
+  # Runs inside the VPC (private subnet) so it reaches both RDS instances
+  # via VPC-internal routing. RDS DNS endpoints resolve to private IPs
+  # within the VPC — no dependency on PubliclyAccessible routing.
+  # Secrets Manager + S3 are reached via VPC endpoints (set up in stack 1).
+  DBSetupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-db-setup"
+      Description: "LDCF DB Setup — runs SQL scripts as CloudFormation custom resource"
+      Runtime: python3.11
+      Handler: handler.handler
+      Role: !GetAtt DBSetupRole.Arn
+      Timeout: 600          # 10 minutes — generous for connection retries
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref DeployBucket
+        S3Key: lambda/05_db_setup.zip
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${EnvironmentName}-lambda-sg"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${EnvironmentName}-private-subnet"
+      Environment:
+        Variables:
+          DEPLOY_BUCKET:     !Ref DeployBucket
+          MYSQL_HOST:        !Ref MySQLEndpoint
+          AURORA_HOST:       !Ref AuroraEndpoint
+          MYSQL_SECRET_ARN:  !Ref MySQLSecretArn
+          AURORA_SECRET_ARN: !Ref AuroraSecretArn
+          DMS_SECRET_ARN:    !Ref DMSSecretArn
+      Tags:
+        - {Key: Name,    Value: !Sub "${EnvironmentName}-db-setup"}
+        - {Key: Purpose, Value: "one-time-setup-custom-resource"}
+
+  # ── Custom Resource — triggers Lambda on Create / Update ─────
+  # CloudFormation waits for Lambda to send SUCCESS/FAILED response.
+  # On stack Delete: Lambda returns SUCCESS immediately (no-op).
+  DBSetup:
+    Type: Custom::DBSetup
+    DependsOn: DBSetupLambda
+    Properties:
+      ServiceToken: !GetAtt DBSetupLambda.Arn
+      # Changing this value on Update forces CloudFormation to re-invoke
+      # the Lambda (useful if you add new data and want to re-run setup)
+      SetupVersion: "3"
+
+Outputs:
+  DBSetupStatus:
+    Description: Custom resource physical resource ID (confirms setup ran)
+    Value: !Ref DBSetup
+
+  DBSetupLambdaArn:
+    Value: !GetAtt DBSetupLambda.Arn
+    Description: DB Setup Lambda ARN — invoke manually to re-run setup
