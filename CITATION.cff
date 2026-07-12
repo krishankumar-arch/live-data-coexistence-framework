@@ -3,39 +3,61 @@ message: "If you use this framework, please cite it as below."
 type: software
 title: "Live Data Coexistence Framework (LDCF)"
 abstract: >
-  A validated five-layer architecture and reference implementation for
-  zero-downtime enterprise legacy system modernization. Enables bidirectional
-  live data synchronization between legacy and cloud systems throughout a
-  multi-year migration program. Includes eight original integrity patterns
-  and a deployable AWS proof-of-concept.
+  A validated five-layer bidirectional architecture for zero-downtime
+  enterprise MIS modernization. Enables bidirectional live data
+  synchronization between legacy and cloud systems throughout a multi-year
+  migration program. Introduces eight original integrity patterns including
+  the Binary Key Bridging Pattern — the first documented systematic solution
+  for mainframe hardware-clock-generated binary surrogate key CDC migration —
+  and a Metadata-Driven Transformation Engine enabling 1-to-many schema
+  decomposition during active replication. Production validated in a live
+  insurance management environment: 300+ tables migrated, 1M+ DML
+  transactions processed, zero unrecovered data loss since early 2025.
+  Includes deployable AWS proof-of-concept implementation.
 authors:
   - family-names: Kumar
     given-names: Krishan
-    orcid: https://orcid.org/0009-0009-7302-7566
+    orcid: "https://orcid.org/0009-0009-7302-7566"
+    affiliation: "Independent Researcher"
 version: "1.0.0"
-date-released: "2026-06-17"
+date-released: "2026-07-11"
 license: Apache-2.0
 repository-code: "https://github.com/krishankumar-arch/live-data-coexistence-framework"
+doi: "10.5281/zenodo.21313169"
+url: "https://doi.org/10.5281/zenodo.21313169"
 keywords:
-  - legacy modernization
-  - data replication
-  - CDC
+  - live data coexistence
   - change data capture
-  - AWS DMS
-  - Aurora PostgreSQL
-  - zero downtime migration
+  - CDC
+  - zero-downtime migration
   - enterprise architecture
+  - distributed systems
+  - mainframe modernization
+  - active-active replication
+  - Apache Kafka
+  - AWS DMS
+  - schema decomposition
+  - idempotency
+  - bidirectional replication
+  - MIS modernization
+  - legacy modernization
+  - Aurora PostgreSQL
   - coexistence pattern
   - bidirectional sync
 preferred-citation:
-  type: article
+  type: report
   title: >
     Live Data Coexistence Framework: A Validated Bidirectional Architecture
     for Zero-Downtime Enterprise MIS Modernization
   authors:
     - family-names: Kumar
       given-names: Krishan
-      orcid: https://orcid.org/0009-0009-7302-7566
+      orcid: "https://orcid.org/0009-0009-7302-7566"
+      affiliation: "Independent Researcher"
   year: 2026
-  journal: "arXiv preprint cs.DC"
-  url: "https://arxiv.org/abs/TBD"
+  month: 7
+  institution:
+    name: "Zenodo"
+  doi: "10.5281/zenodo.21313169"
+  url: "https://doi.org/10.5281/zenodo.21313169"
+  license: Apache-2.0
