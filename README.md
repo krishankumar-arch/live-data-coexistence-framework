@@ -2,9 +2,10 @@
 
 > **A Validated Architecture for Zero-Downtime Enterprise Legacy Modernization**
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Zenodo](https://img.shields.io/badge/Zenodo)](https://doi.org/10.5281/zenodo.21313169)
-[![ORCID](https://img.shields.io/badge/ORCID-0009--0009--7302--7566-green)](https://orcid.org/0009-0009-7302-7566)
+[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.21313169.svg)](https://doi.org/10.5281/zenodo.21313169)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![ORCID](https://img.shields.io/badge/ORCID-0009--0009--7302--7566-brightgreen.svg)](https://orcid.org/0009-0009-7302-7566)
+[![Version](https://img.shields.io/badge/Version-1.0-orange.svg)](https://doi.org/10.5281/zenodo.21313169)
 [![AWS](https://img.shields.io/badge/AWS-Powered-orange)](https://aws.amazon.com)
 
 ---
